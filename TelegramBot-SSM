@@ -1,0 +1,209 @@
+import os
+import requests
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Dispatcher
+
+# Your actual API keys and bot token
+TELEGRAM_BOT_TOKEN = '7844697615:AAEbzFomptbExU8hhkUAlJgpjn4UxygtH8Q'  # Replace with your bot token
+N1_PANEL_API_KEY = os.getenv('N1_PANEL_API_KEY', 'YOUR_N1_PANEL_API_KEY')  # Replace with your actual N1 Panel API key
+REVELON_API_KEY = os.getenv('REVELON_API_KEY', 'YOUR_REVELON_API_KEY')  # Replace with your actual Revelon API key
+N1_PANEL_BASE_URL = 'https://n1panel.com/api/v1/'
+REVELON_PAYMENT_URL = 'https://revelon.com/api/pay'
+
+# Admin list: Only these users can access the admin panel
+ADMIN_IDS = [123456789, 987654321]  # Replace with actual admin user IDs
+
+app = Flask(__name__)
+dispatcher = Dispatcher()
+
+# 1. Start Command Handler
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    keyboard = [
+        [InlineKeyboardButton("Purchase Service", callback_data='purchase_service')],
+        [InlineKeyboardButton("Help", callback_data='help')],
+    ]
+
+    # Check if the user is an admin
+    if user_id in ADMIN_IDS:
+        keyboard.append([InlineKeyboardButton("Admin Panel", callback_data='admin_panel')])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Welcome! Choose an option:', reply_markup=reply_markup)
+
+# 2. Purchase Service Callback
+async def purchase_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    services = get_services_from_n1_panel()
+
+    if services:
+        keyboard = [
+            [InlineKeyboardButton(service['name'], callback_data=f'service_{service["id"]}')] for service in services
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text="Select a service to purchase:", reply_markup=reply_markup)
+    else:
+        await query.edit_message_text(text="No services available.")
+
+# 3. Handle Service Selection and Initiate Payment
+async def service_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    service_id = query.data.split('_')[1]
+    price = get_service_price(service_id)
+
+    payment_url = initiate_revelon_payment(service_id, price)
+
+    await query.edit_message_text(text=f"Please make your payment here: {payment_url}")
+
+# 4. Admin Panel Handler
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.edit_message_text("Unauthorized access.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("View Orders", callback_data='view_orders')],
+        [InlineKeyboardButton("View Payments", callback_data='view_payments')],
+        [InlineKeyboardButton("Manage Services", callback_data='manage_services')],
+        [InlineKeyboardButton("Back to Menu", callback_data='back_to_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("Admin Panel: Choose an action.", reply_markup=reply_markup)
+
+# 5. View Orders Handler (Admin)
+async def view_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    orders = get_orders_from_n1_panel()
+
+    if orders:
+        orders_list = "\n".join([f"Order {order['id']}: {order['service']} - {order['status']}" for order in orders])
+        await query.edit_message_text(f"Orders:\n{orders_list}")
+    else:
+        await query.edit_message_text("No orders found.")
+
+# 6. View Payments Handler (Admin)
+async def view_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    payments = get_payments_from_revelon()
+
+    if payments:
+        payments_list = "\n".join([f"Payment {payment['id']}: ${payment['amount']} - {payment['status']}" for payment in payments])
+        await query.edit_message_text(f"Payments:\n{payments_list}")
+    else:
+        await query.edit_message_text("No payments found.")
+
+# 7. Manage Services Handler (Admin)
+async def manage_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    services = get_services_from_n1_panel()
+
+    if services:
+        services_list = "\n".join([f"Service {service['id']}: {service['name']}" for service in services])
+        await query.edit_message_text(f"Services:\n{services_list}")
+    else:
+        await query.edit_message_text("No services found.")
+
+# 8. Back to Menu Handler
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await start(update, context)
+
+# Fetch services from N1 Panel API
+def get_services_from_n1_panel():
+    try:
+        response = requests.get(f"{N1_PANEL_BASE_URL}/services", headers={"Authorization": f"Bearer {N1_PANEL_API_KEY}"})
+        response.raise_for_status()
+        return response.json().get("services", [])
+    except requests.exceptions.RequestException:
+        return []
+
+# Fetch service price from N1 Panel API
+def get_service_price(service_id):
+    try:
+        response = requests.get(f"{N1_PANEL_BASE_URL}/services/{service_id}/price", headers={"Authorization": f"Bearer {N1_PANEL_API_KEY}"})
+        response.raise_for_status()
+        return response.json().get("price", 0)
+    except requests.exceptions.RequestException:
+        return 0
+
+# Initiate payment via Revelon API
+def initiate_revelon_payment(service_id, amount):
+    try:
+        payload = {
+            "service_id": service_id,
+            "amount": amount,
+            "callback_url": "https://yourdomain.com/callback"
+        }
+        headers = {"Authorization": f"Bearer {REVELON_API_KEY}"}
+        response = requests.post(REVELON_PAYMENT_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json().get("payment_url")
+    except requests.exceptions.RequestException:
+        return None
+
+# Fetch Orders from N1 Panel API (admin functionality)
+def get_orders_from_n1_panel():
+    try:
+        response = requests.get(f"{N1_PANEL_BASE_URL}/orders", headers={"Authorization": f"Bearer {N1_PANEL_API_KEY}"})
+        response.raise_for_status()
+        return response.json().get("orders", [])
+    except requests.exceptions.RequestException:
+        return []
+
+# Fetch Payments from Revelon API (admin functionality)
+def get_payments_from_revelon():
+    try:
+        response = requests.get(f"{REVELON_PAYMENT_URL}/payments", headers={"Authorization": f"Bearer {REVELON_API_KEY}"})
+        response.raise_for_status()
+        return response.json().get("payments", [])
+    except requests.exceptions.RequestException:
+        return []
+
+# Set up Telegram command and callback handlers
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CallbackQueryHandler(purchase_service, pattern='purchase_service'))
+dispatcher.add_handler(CallbackQueryHandler(service_selected, pattern=r'service_\d+'))
+dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='admin_panel'))
+dispatcher.add_handler(CallbackQueryHandler(view_orders, pattern='view_orders'))
+dispatcher.add_handler(CallbackQueryHandler(view_payments, pattern='view_payments'))
+dispatcher.add_handler(CallbackQueryHandler(manage_services, pattern='manage_services'))
+dispatcher.add_handler(CallbackQueryHandler(back_to_menu, pattern='back_to_menu'))
+
+# Webhook URL (replace this with your webhook URL from Bot.business)
+@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), dispatcher.bot)
+    dispatcher.process_update(update)
+    return "ok"
+
+# Set up the bot and set webhook
+async def setup_bot():
+    bot = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    webhook_url = f"https://yourdomain.com/{TELEGRAM_BOT_TOKEN}"  # Use your actual domain
+    await bot.bot.set_webhook(webhook_url)
+    return bot
+
+# Start the bot server
+if __name__ == "__main__":
+    # Set webhook when starting the app
+    app.before_first_request(setup_bot)
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
